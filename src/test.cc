@@ -3,6 +3,7 @@
 
 #include <iostream>
 #include <vector>
+#include <chrono>
 
 // #ifdef USE_EMP
 using namespace emp;
@@ -150,6 +151,23 @@ void TestShareTranslation(char **argv) {
 
   ShareTranslation(perm, length, party, io, a, b, delta);
 
+  if (party == ALICE) {
+    std::cout << "========================== output a" << std::endl;
+    for (int i = 0; i < length; i++) {
+      std::cout << a[i] << std::endl;
+    }
+
+    std::cout << "========================== output b" << std::endl;
+    for (int i = 0; i < length; i++) {
+      std::cout << b[i] << std::endl;
+    }
+  } else {
+    std::cout << "========================== output delta" << std::endl;
+    for (int i = 0; i < length; i++) {
+      std::cout << delta[i] << std::endl;
+    }
+  }
+
   delete io;
 }
 
@@ -165,18 +183,6 @@ void TestPermReconstruct() {
     {{{3, 2, 0, 1}, {1, 3, 0, 2}, {1, 0, 3, 2}, {2, 0, 1, 3}}, 
      {{1, 3, 0, 2}, {1, 0, 3, 2}, {2, 0, 1, 3}, {3, 2, 0, 1}}, 
      {{1, 2, 0, 3}, {0, 1, 3, 2}, {0, 1, 2, 3}, {0, 2, 3, 1}}};
-
-  // uint64_t ***perms_ptr = (uint64_t ***)malloc(d * sizeof(uint64_t **));
-
-  // for (int i = 0; i < d; i++) {
-  //   perms_ptr[i] = (uint64_t **)malloc(subperm_num * sizeof(uint64_t *));
-  //   for (int j = 0; j < subperm_num; j++) {
-  //     perms_ptr[i][j] = (uint64_t *)malloc(T * sizeof(uint64_t));
-  //     for (int k = 0; k < T; k++) {
-  //       perms_ptr[i][j][k] = perms[i][j][k];
-  //     }
-  //   }
-  // }
 
   uint64_t perm[N];
   PermReconstruct(d, N, T, n, t, (uint64_t *)perms, perm);
@@ -207,27 +213,50 @@ void TestPermuteShare(char **argv) {
   int d = 2 * (int)ceil(n / t) - 1;
   int subperm_num = N / T;
 
-  uint64_t perms[d][subperm_num][T] = 
-    {{{3, 2, 0, 1}, {1, 3, 0, 2}, {1, 0, 3, 2}, {2, 0, 1, 3}}, 
-     {{1, 3, 0, 2}, {1, 0, 3, 2}, {2, 0, 1, 3}, {3, 2, 0, 1}}, 
-     {{1, 2, 0, 3}, {0, 1, 3, 2}, {0, 1, 2, 3}, {0, 2, 3, 1}}};
-  uint64_t perm[N];
-
   PRG prg;
   block x[N];
   block out[N];
-  prg.random_block(x, N);
 
   for (int i = 0; i < N; i++) {
-    std::cout << x[i] << std::endl;
+    x[i] = makeBlock(0, i);
   }
 
-  PermReconstruct(d, N, T, n, t, (uint64_t *)perms, perm);
-  // PermuteShare(N, T, (uint64_t *)perms, perm, x, party, io, out);
+  block a[N];
+  block b[N];
+  block delta[N];
+  uint64_t perms[d * N];
+  for (int i = 0; i < d * N; i++) {
+    perms[i] = i % T;
+  }
 
-  std::cout << "================================ [out]" << std::endl;
-  for (int i = 0; i < N; i++) {
-    std::cout << out[i] << std::endl;
+  std::random_device rd;
+  std::mt19937 g(rd());
+
+  for (int i = 0; i < d * subperm_num; i++) {
+    std::shuffle(perms + i * T, perms + (i + 1) * T, g);
+  }
+
+  uint64_t subperms[d * N];
+  uint64_t perm[N];
+
+  Offline(N, T, perms, party, io, perm, a, b, delta);
+
+  PermuteShare(N, T, perm, delta, x, a, b, party, io, out);
+
+  if (party == ALICE) {
+    io->send_block(out, N);
+  } else {
+    std::cout << "============================= [perm]" << std::endl;
+    for (int i = 0; i < N; i++) {
+      std::cout << perm[i] << " ";
+    }
+    
+    std::cout << "\n============================= [out]" << std::endl;
+    block out_[N];
+    io->recv_block(out_, N);
+    for (int i = 0; i < N; i++) {
+      std::cout << out[i] + out_[i] << std::endl;;
+    }
   }
 
   delete io;
@@ -246,8 +275,8 @@ void TestSSShuffle(char **argv) {
                                           false);
 
 
-  uint64_t N = 128;
-  uint64_t T = 16;
+  uint64_t N = 1 << 12;
+  uint64_t T = 128;
   int n = (int)(log2(N));
   int t = (int)(log2(T));
   int d = 2 * (int)ceil(n / t) - 1;
@@ -278,13 +307,44 @@ void TestSSShuffle(char **argv) {
   uint64_t subperms[d * N];
   uint64_t perm[N];
 
-  Offline(N, T, perms, party, io, perm, subperms, a, b, offset, delta);
-  std::cout << io->schannel->counter << std::endl;
-  SecretSharedShuffle(N, T, party, io, x, a, b, offset, subperms, perm, delta, out);
+  // std::cout << "==================== subperms" << std::endl;
+  // for (int i = 0; i < d * N; i++) {
+  //   std::cout << perms[i] << " ";
+  // }
+  // std::cout << std::endl;
 
-  for (int i = 0; i < N; i++) {
-    std::cout << out[i] << std::endl;
-  }
+  auto start = std::chrono::system_clock::now();
+  Offline(N, T, perms, party, io, perm, a, b, delta);
+  auto end = std::chrono::system_clock::now();
+  auto dura = std::chrono::duration_cast<std::chrono::milliseconds>(end - start);
+  std::cout << "time: " << double(dura.count()) * std::chrono::milliseconds::period::num / std::chrono::milliseconds::period::den << "s" << std::endl;
+
+  start = std::chrono::system_clock::now();
+  SecretSharedShuffle(N, T, party, io, x, perm, delta, a, b, out);
+  end = std::chrono::system_clock::now();
+  dura = std::chrono::duration_cast<std::chrono::milliseconds>(end - start);
+  std::cout << "time: " << double(dura.count()) * std::chrono::milliseconds::period::num / std::chrono::milliseconds::period::den << "s" << std::endl;
+
+  // if (party == ALICE) {
+  //   for (int i = 0; i < N; i++) {
+  //     std::cout << perm[i] << " ";
+  //   }
+  //   std::cout << std::endl;
+  //   io->send_block(out, N);
+  // } else {
+
+  //   for (int i = 0; i < N; i++) {
+  //     std::cout << perm[i] << " ";
+  //   }
+  //   std::cout << std::endl;
+    
+  //   std::cout << "\n============================= [out]" << std::endl;
+  //   block out_[N];
+  //   io->recv_block(out_, N);
+  //   for (int i = 0; i < N; i++) {
+  //     std::cout << out[i] + out_[i] << std::endl;;
+  //   }
+  // }
 
   delete io;
 }

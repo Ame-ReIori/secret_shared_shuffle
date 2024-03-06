@@ -92,7 +92,7 @@ void PermReconstruct(int d, uint64_t N, uint64_t T, int n, int t, uint64_t *perm
     perm[i] = i;
   }
   // process first d / 2 layers
-  for (int i = 0; i < d / 2; i++) {
+  for (int i = 0; i < d / 2; i++) { 
     counter = 0;
     for (int j = 0; j < subperm_num; j++) {
       prefix = counter >> suffix_len;
@@ -191,27 +191,33 @@ void Reallocate(block *v, int layer, int d, uint64_t N, uint64_t T, int n, int t
 }
 
 void Offline(uint64_t N, uint64_t T, uint64_t *perms, uint64_t party, HighSpeedNetIO *io,
-             uint64_t *perm, uint64_t *subperms,
-             block *a, block *b, block *offset, block *delta) {
+             uint64_t *perm, block *a, block * b, block *delta) {
   int n = (int)(log2(N));
   int t = (int)(log2(T));
   int d = 2 * (int)ceil(n / t) - 1;
   int subperm_num = N / T;
   uint64_t *subperm;
+  uint64_t subperms[d * N];
+
+  block as[d * N];
+  block bs[d * N];
+  block deltas[d * N];
+  block offset[(d - 1) * N];
+  block offset_[(d - 1) * N];
 
   PermReconstruct(d, N, T, n, t, perms, perm);
   if (party == ALICE) {
     for (int i = 0; i < d; i++) {
       for (int j = 0; j < subperm_num; j++) {
         ShareTranslation(nullptr, T, ALICE, io,
-                        LocateVector<block>(a, d, subperm_num, T, i, j), 
-                        LocateVector<block>(b, d, subperm_num, T, i, j), 
+                        LocateVector<block>(as, d, subperm_num, T, i, j), 
+                        LocateVector<block>(bs, d, subperm_num, T, i, j), 
                         nullptr);
               
         subperm = LocateVector<uint64_t>(perms, d, subperm_num, T, i, j);
         ShareTranslation(subperm, T, BOB, io,
                         nullptr, nullptr, 
-                        LocateVector<block>(delta, d, subperm_num, T, i, j));
+                        LocateVector<block>(deltas, d, subperm_num, T, i, j));
       }
     }
   } else {
@@ -220,10 +226,10 @@ void Offline(uint64_t N, uint64_t T, uint64_t *perms, uint64_t party, HighSpeedN
         subperm = LocateVector<uint64_t>(perms, d, subperm_num, T, i, j);
         ShareTranslation(subperm, T, BOB, io,
                         nullptr, nullptr, 
-                        LocateVector<block>(delta, d, subperm_num, T, i, j));
+                        LocateVector<block>(deltas, d, subperm_num, T, i, j));
         ShareTranslation(nullptr, T, ALICE, io,
-                        LocateVector<block>(a, d, subperm_num, T, i, j), 
-                        LocateVector<block>(b, d, subperm_num, T, i, j), 
+                        LocateVector<block>(as, d, subperm_num, T, i, j), 
+                        LocateVector<block>(bs, d, subperm_num, T, i, j), 
                         nullptr);
       }
     }
@@ -231,25 +237,51 @@ void Offline(uint64_t N, uint64_t T, uint64_t *perms, uint64_t party, HighSpeedN
   
   // reallocate a and b
   for (int i = 0; i < d; i++) {
-    Reallocate(a + i * N, i, d, N, T, n, t);
-    Reallocate(b + i * N, i, d, N, T, n, t);
-  }
-  // calculate delta = a ^ {i + 1} - b^i
-  for (int i = 0; i < (d - 1) * N; i++) {
-    offset[i] = a[N + i] - b[i];
-  }
-  for (int i = 0; i < d; i++) {
-    Reallocate(delta + i * N, i, d, N, T, n, t);
+    Reallocate(as + i * N, i, d, N, T, n, t);
+    Reallocate(bs + i * N, i, d, N, T, n, t);
+    Reallocate(deltas + i * N, i, d, N, T, n, t);
     SubPermReconstruct(i, d, N, T, n, t,
                        perms + i * N, 
                        subperms + i * N);
   }
+
+  // calculate delta = a ^ {i + 1} - b^i
+  for (int i = 0; i < (d - 1) * N; i++) {
+    offset[i] = as[N + i] - bs[i];
+  }
+
+  // obtain the final delta
+  if (party == ALICE) {
+    io->send_block(offset, (d - 1) * N);
+    io->recv_block(offset_, (d - 1) * N);
+  } else {
+    io->recv_block(offset_, (d - 1) * N);
+    io->send_block(offset, (d - 1) * N);
+  }
   
+  for (int i = 0; i < N; i++) {
+    delta[i] = deltas[i] + offset_[i];
+  }
+
+  for (int i = N; i < (d - 1) * N; i += N) {
+    SimplePerm<block>(subperms + i, N, delta);
+
+    for (int j = 0; j < N; j++) {
+      delta[j] += (deltas[i + j] + offset_[i + j]);
+    }
+  }
+
+  SimplePerm<block>(subperms + (d - 1) * N, N, delta);
+  for (int i = 0; i < N; i++) {
+    a[i] = as[i];
+    b[i] = bs[(d - 1) * N + i];
+    delta[i] += deltas[(d - 1) * N + i];
+  }
 }
 
 void PermuteShare(uint64_t N, uint64_t T, 
-                  uint64_t *perm, uint64_t *subperms, block *delta,
-                  block *x, block *a, block *b, block *offset,
+                  uint64_t *perm, block *delta,
+                  block *x, block *a, block *b,
                   uint64_t party, HighSpeedNetIO *io, 
                   block *out) {
   // implementation of single round permute+share
@@ -268,53 +300,28 @@ void PermuteShare(uint64_t N, uint64_t T,
       m[i] = x[i] + a[i];
     }
 
-    io->send_block(offset, (d - 1) * N);
     io->send_block(m, N);
     io->recv_block(w, N);
 
     for (int i = 0; i < N; i++) {
-      out[i] = w[i] - b[(d - 1) * N + i];
+      out[i] = w[i] - b[i];
     }
   } else {
     // already computes the subpermutation, stored in perms
-    block diff[(d - 1) * N];
     PRG prg;
     prg.random_block(w, N);
-    io->recv_block(diff, (d - 1) * N);
     io->recv_block(m, N);
     io->send_block(w, N);
-    std::cout << "111" << std::endl;
-    
-    // Delta^1 + delta^1
-    for (int i = 0; i < N; i++) {
-      delta[i] += diff[i];
-    }
-
-    // process \pi_2 - \pi_{d - 1}
-    for (int i = N; i < (d - 1) * N; i += N) {
-      SimplePerm<block>(subperms + i, N, delta);
-
-      for (int j = 0; j < N; j++) {
-        delta[j] += (delta[i + j] + diff[i + j]);
-      }
-    }
-
-    SimplePerm<block>(subperms + (d - 1) * N, N, delta);
-    for (int i = 0; i < N; i++) {
-      delta[i] += delta[(d - 1) * N + i];
-    }
 
     SimplePerm(perm, N, m);
     for (int i = 0; i < N; i++) {
       out[i] = m[i] + delta[i] - w[i];
     }
   }
-
 }
 
 void SecretSharedShuffle(uint64_t N, uint64_t T, uint64_t party, HighSpeedNetIO *io, 
-                         block *x, block *a, block *b, block *offset,
-                         uint64_t *subperms, uint64_t *perm, block *delta,
+                         block *x, uint64_t *perm, block *delta, block *a, block *b,
                          block *out) {
   block out0[N];
 
@@ -325,21 +332,19 @@ void SecretSharedShuffle(uint64_t N, uint64_t T, uint64_t party, HighSpeedNetIO 
 
 
   if (party == ALICE) {
-    PermuteShare(N, T, nullptr, nullptr, nullptr, x, a, b, offset, ALICE, io, out0);
-    PermuteShare(N, T, perm, subperms, delta, 
-                 nullptr, nullptr, nullptr, nullptr, BOB, io, out);
+    PermuteShare(N, T, nullptr, nullptr, x, a, b, ALICE, io, out0);
+    PermuteShare(N, T, perm, delta, nullptr, nullptr, nullptr, BOB, io, out);
 
     SimplePerm(perm, N, out0);
     for (int i = 0; i < N; i++) {
       out[i] += out0[i];
     }
   } else { // bob
-    PermuteShare(N, T, perm, subperms, delta, 
-                 nullptr, nullptr, nullptr, nullptr, BOB, io, out);
+    PermuteShare(N, T, perm, delta, nullptr, nullptr, nullptr, BOB, io, out0);
     SimplePerm<block>(perm, N, x);
     for (int i = 0; i < N; i++) {
       x[i] += out0[i];
     }
-    PermuteShare(N, T, nullptr, nullptr, nullptr, x, a, b, offset, ALICE, io, out0);
+    PermuteShare(N, T, nullptr, nullptr, x, a, b, ALICE, io, out);
   }
 }
