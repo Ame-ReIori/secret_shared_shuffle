@@ -7,19 +7,30 @@
  * @param io: io
  * @param out: the pointer of output value.
  */
+#ifdef USE_EMP
 void ShareTranslation(uint64_t *perm, int length, int party, HighSpeedNetIO *io,
+#elif defined USE_LIBOTE
+void ShareTranslation(uint64_t *perm, int length, int party, cp::Socket & chl,
+#endif
                       block *a, block *b, block *delta) {
   // alice has two outputs, a and b, while bob has only one, delta.
   block v[length][length];
   block **seeds = (block **)malloc(length * sizeof(block *));
-
+#ifdef USE_EMP
   if (party == ALICE) {
+#elif defined USE_LIBOTE
+  if (party == Role::Alice) {
+#endif
     // ALICE gets the whole matrix and generate vector a and b
     memset(a, 0, length * sizeof(block));
     memset(b, 0, length * sizeof(block));
 
     for (int i = 0; i < length; i++) {
+#ifdef USE_EMP
       OblivSetup(length, -1, party, io, seeds + i);
+#elif defined USE_LIBOTE
+      OblivSetup(length, -1, party, chl, seeds + i);
+#endif
       Expand(length, -1, *(seeds + i), party, v[i]);
     }
 
@@ -30,11 +41,17 @@ void ShareTranslation(uint64_t *perm, int length, int party, HighSpeedNetIO *io,
       }
     }
 
+
+
   } else {
     memset(delta, 0, length * sizeof(block));
 
     for (int i = 0; i < length; i++) {
+#ifdef USE_EMP
       OblivSetup(length, perm[i], party, io, seeds + i);
+#elif defined USE_LIBOTE
+      OblivSetup(length, perm[i], party, chl, seeds + i);
+#endif
       Expand(length, perm[i], *(seeds + i), party, v[i]);
     }
 
@@ -45,6 +62,7 @@ void ShareTranslation(uint64_t *perm, int length, int party, HighSpeedNetIO *io,
     }
   }
 }
+
 
 template<typename T>
 T *LocateVector(T *vecs, int x, int y, int z, int i, int j) {
@@ -190,7 +208,11 @@ void Reallocate(block *v, int layer, int d, uint64_t N, uint64_t T, int n, int t
   memcpy(v, tmp, N * sizeof(block));
 }
 
+#ifdef USE_EMP
 void Offline(uint64_t N, uint64_t T, uint64_t *perms, uint64_t party, HighSpeedNetIO *io,
+#elif defined USE_LIBOTE
+void Offline(uint64_t N, uint64_t T, uint64_t *perms, uint64_t party, cp::Socket & chl,
+#endif
              uint64_t *perm, block *a, block * b, block *delta) {
   int n = (int)(log2(N));
   int t = (int)(log2(T));
@@ -206,24 +228,42 @@ void Offline(uint64_t N, uint64_t T, uint64_t *perms, uint64_t party, HighSpeedN
   block offset_[(d - 1) * N];
 
   PermReconstruct(d, N, T, n, t, perms, perm);
+#ifdef USE_EMP
   if (party == ALICE) {
+#elif defined USE_LIBOTE
+  if (party == Role::Alice) {
+#endif
     for (int i = 0; i < d; i++) {
       for (int j = 0; j < subperm_num; j++) {
+#ifdef USE_EMP
         ShareTranslation(nullptr, T, ALICE, io,
                         LocateVector<block>(as, d, subperm_num, T, i, j), 
                         LocateVector<block>(bs, d, subperm_num, T, i, j), 
                         nullptr);
-              
+#elif defined USE_LIBOTE
+        ShareTranslation(nullptr, T, Role::Alice, chl,
+                        LocateVector<block>(as, d, subperm_num, T, i, j), 
+                        LocateVector<block>(bs, d, subperm_num, T, i, j), 
+                        nullptr);
+#endif
         subperm = LocateVector<uint64_t>(perms, d, subperm_num, T, i, j);
+
+#ifdef USE_EMP
         ShareTranslation(subperm, T, BOB, io,
                         nullptr, nullptr, 
                         LocateVector<block>(deltas, d, subperm_num, T, i, j));
+#elif defined USE_LIBOTE
+        ShareTranslation(subperm, T, Role::Bob, chl,
+                        nullptr, nullptr, 
+                        LocateVector<block>(deltas, d, subperm_num, T, i, j));
+#endif
       }
     }
   } else {
     for (int i = 0; i < d; i++) {
       for (int j = 0; j < subperm_num; j++) {
         subperm = LocateVector<uint64_t>(perms, d, subperm_num, T, i, j);
+#ifdef USE_EMP
         ShareTranslation(subperm, T, BOB, io,
                         nullptr, nullptr, 
                         LocateVector<block>(deltas, d, subperm_num, T, i, j));
@@ -231,6 +271,15 @@ void Offline(uint64_t N, uint64_t T, uint64_t *perms, uint64_t party, HighSpeedN
                         LocateVector<block>(as, d, subperm_num, T, i, j), 
                         LocateVector<block>(bs, d, subperm_num, T, i, j), 
                         nullptr);
+#elif defined USE_LIBOTE
+        ShareTranslation(subperm, T, Role::Bob, chl,
+                        nullptr, nullptr, 
+                        LocateVector<block>(deltas, d, subperm_num, T, i, j));
+        ShareTranslation(nullptr, T, Role::Alice, chl,
+                        LocateVector<block>(as, d, subperm_num, T, i, j), 
+                        LocateVector<block>(bs, d, subperm_num, T, i, j), 
+                        nullptr);
+#endif
       }
     }
   }
@@ -249,7 +298,7 @@ void Offline(uint64_t N, uint64_t T, uint64_t *perms, uint64_t party, HighSpeedN
   for (int i = 0; i < (d - 1) * N; i++) {
     offset[i] = as[N + i] - bs[i];
   }
-
+#ifdef USE_EMP
   // obtain the final delta
   if (party == ALICE) {
     io->send_block(offset, (d - 1) * N);
@@ -258,7 +307,18 @@ void Offline(uint64_t N, uint64_t T, uint64_t *perms, uint64_t party, HighSpeedN
     io->recv_block(offset_, (d - 1) * N);
     io->send_block(offset, (d - 1) * N);
   }
-  
+#elif defined USE_LIBOTE
+  std::vector<block> vOffset(offset, offset + (d - 1) * N);
+  std::vector<block> vOffset_((d - 1) * N);
+  if (party == Role::Alice) {
+    cp::sync_wait(chl.send(vOffset));
+    cp::sync_wait(chl.recv(vOffset_));
+  } else {
+    cp::sync_wait(chl.recv(vOffset_));
+    cp::sync_wait(chl.send(vOffset));
+  }
+  memcpy(offset_, vOffset_.data(), (d - 1) * N * sizeof(block));
+#endif
   for (int i = 0; i < N; i++) {
     delta[i] = deltas[i] + offset_[i];
   }
@@ -279,11 +339,19 @@ void Offline(uint64_t N, uint64_t T, uint64_t *perms, uint64_t party, HighSpeedN
   }
 }
 
+#ifdef USE_EMP
 void PermuteShare(uint64_t N, uint64_t T, 
                   uint64_t *perm, block *delta,
                   block *x, block *a, block *b,
                   uint64_t party, HighSpeedNetIO *io, 
                   block *out) {
+#elif defined USE_LIBOTE
+void PermuteShare(uint64_t N, uint64_t T, 
+                  uint64_t *perm, block *delta,
+                  block *x, block *a, block *b,
+                  uint64_t party, cp::Socket & chl, 
+                  block *out) {
+#endif
   // implementation of single round permute+share
   int n = (int)(log2(N));
   int t = (int)(log2(T));
@@ -293,26 +361,44 @@ void PermuteShare(uint64_t N, uint64_t T,
 
   block m[N];
   block w[N];
-  
+#ifdef USE_EMP
   if (party == ALICE) {
+#elif defined USE_LIBOTE
+  if (party == Role::Alice) {
+#endif
     // calculate x + a^1
     for (int i = 0; i < N; i++) {
       m[i] = x[i] + a[i];
     }
-
+#ifdef USE_EMP
     io->send_block(m, N);
     io->recv_block(w, N);
-
+#elif defined USE_LIBOTE
+    std::vector<block> m_view(m, m + N);
+    std::vector<block> w_view(N);
+    cp::sync_wait(chl.send(m_view));
+    cp::sync_wait(chl.recv(w_view));
+    memcpy(w, w_view.data(), N * sizeof(block));
+#endif
     for (int i = 0; i < N; i++) {
       out[i] = w[i] - b[i];
     }
   } else {
     // already computes the subpermutation, stored in perms
+#ifdef USE_EMP
     PRG prg;
     prg.random_block(w, N);
     io->recv_block(m, N);
     io->send_block(w, N);
-
+#elif defined USE_LIBOTE
+    PRNG prg(sysRandomSeed());
+    prg.get(w, N);
+    std::vector<block> m_view(N);
+    std::vector<block> w_view(w, w + N);
+    cp::sync_wait(chl.recv(m_view));
+    cp::sync_wait(chl.send(w_view));
+    memcpy(m, m_view.data(), N * sizeof(block));
+#endif
     SimplePerm(perm, N, m);
     for (int i = 0; i < N; i++) {
       out[i] = m[i] + delta[i] - w[i];
@@ -320,7 +406,11 @@ void PermuteShare(uint64_t N, uint64_t T,
   }
 }
 
+#ifdef USE_EMP
 void SecretSharedShuffle(uint64_t N, uint64_t T, uint64_t party, HighSpeedNetIO *io, 
+#elif defined USE_LIBOTE
+void SecretSharedShuffle(uint64_t N, uint64_t T, uint64_t party, cp::Socket & chl, 
+#endif
                          block *x, uint64_t *perm, block *delta, block *a, block *b,
                          block *out) {
   block out0[N];
@@ -330,21 +420,34 @@ void SecretSharedShuffle(uint64_t N, uint64_t T, uint64_t party, HighSpeedNetIO 
   int d = 2 * (int)ceil(n / t) - 1;
   int subperm_num = N / T;
 
-
+#ifdef USE_EMP
   if (party == ALICE) {
     PermuteShare(N, T, nullptr, nullptr, x, a, b, ALICE, io, out0);
     PermuteShare(N, T, perm, delta, nullptr, nullptr, nullptr, BOB, io, out);
+#elif defined USE_LIBOTE
+  if (party == Role::Alice) {
+    PermuteShare(N, T, nullptr, nullptr, x, a, b, Role::Alice, chl, out0);
+    PermuteShare(N, T, perm, delta, nullptr, nullptr, nullptr, Role::Bob, chl, out);
+#endif
 
     SimplePerm(perm, N, out0);
     for (int i = 0; i < N; i++) {
       out[i] += out0[i];
     }
   } else { // bob
+#ifdef USE_EMP
     PermuteShare(N, T, perm, delta, nullptr, nullptr, nullptr, BOB, io, out0);
+#elif defined USE_LIBOTE
+    PermuteShare(N, T, perm, delta, nullptr, nullptr, nullptr, Role::Bob, chl, out0);
+#endif
     SimplePerm<block>(perm, N, x);
     for (int i = 0; i < N; i++) {
       x[i] += out0[i];
     }
+#ifdef USE_EMP
     PermuteShare(N, T, nullptr, nullptr, x, a, b, ALICE, io, out);
+#elif defined USE_LIBOTE
+    PermuteShare(N, T, nullptr, nullptr, x, a, b, Role::Alice, chl, out);
+#endif
   }
 }

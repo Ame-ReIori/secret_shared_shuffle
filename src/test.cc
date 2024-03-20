@@ -5,14 +5,85 @@
 #include <vector>
 #include <chrono>
 
-// #ifdef USE_EMP
+#ifdef USE_EMP
 using namespace emp;
-// #endif
+#endif
 
-// #ifdef USE_EMP
+#ifdef USE_LIBOTE
+using namespace osuCrypto;
+#endif
+
+
+#include <cryptoTools/Crypto/PRNG.h>
+#include <libOTe/Base/BaseOT.h>
+#include <libOTe/TwoChooseOne/Iknp/IknpOtExtReceiver.h>
+#include <libOTe/TwoChooseOne/Iknp/IknpOtExtSender.h>
+#include <coproto/Socket/AsioSocket.h>
+
+void TestLibOTeIKNP(char **argv) {
+  auto ip = std::string("127.0.0.1");
+  auto port = 8913;
+  int party = atoi(argv[1]);
+  std::string socket = ip + ":" + std::to_string(port);
+  std::string hint = "libOTe_chl";
+
+  uint64_t nOT = 1 << 10;
+  osuCrypto::PRNG prng(osuCrypto::sysRandomSeed());
+  if (party == 0) {
+    auto chl = osuCrypto::cp::asioConnect(socket, true);
+    osuCrypto::IknpOtExtSender sender;
+
+    // prepare data
+    std::vector<std::array<osuCrypto::block, 2>> send_msg(nOT);
+
+    prng.get(send_msg.data(), send_msg.size());
+    
+    osuCrypto::DefaultBaseOT base;
+    osuCrypto::BitVector bv(sender.baseOtCount());
+    std::vector<osuCrypto::block> base_msg(sender.baseOtCount());
+    bv.randomize(prng);
+
+    osuCrypto::cp::sync_wait(base.receive(bv, base_msg, prng, chl));
+    sender.setBaseOts(base_msg, bv);
+
+    osuCrypto::cp::sync_wait(sender.sendChosen(send_msg, prng, chl));
+
+    // for (int i = 0; i < nOT; i++) {
+    //   std::cout << send_msg[i][0] << "\t" << send_msg[i][1] << std::endl;
+    // }
+
+    std::cout << "===== communication statistics =====" << std::endl;
+    std::cout << "Received: " << chl.bytesReceived() << " B" << std::endl;
+    std::cout << "Sent: " << chl.bytesSent() << " B" << std::endl;
+
+  } else {
+    auto chl = osuCrypto::cp::asioConnect(socket, false);
+    osuCrypto::IknpOtExtReceiver receiver;
+    
+    std::vector<osuCrypto::block> recv_msg(nOT);
+    osuCrypto::BitVector b(nOT);
+    
+    b.randomize(prng);
+
+    osuCrypto::DefaultBaseOT base;
+    std::vector<std::array<osuCrypto::block, 2>> base_msg(receiver.baseOtCount());
+
+    osuCrypto::cp::sync_wait(base.send(base_msg, prng, chl));
+    receiver.setBaseOts(base_msg);
+
+    osuCrypto::cp::sync_wait(receiver.receiveChosen(b, recv_msg, prng, chl));
+
+    // for (int i = 0; i < nOT; i++) {
+    //   std::cout << (int)b[i] << "\t" << recv_msg[i] << std::endl;
+    // }
+
+  }
+}
+
+#ifdef USE_EMP
 void TestIKNPOT(char **argv) {
   int port, party;
-  int nOT = 128;
+  int nOT = 1 << 10;
 
   block *m0 = new block[nOT];
   block *m1 = new block[nOT];
@@ -33,7 +104,7 @@ void TestIKNPOT(char **argv) {
   
   // initial iknp ot
   IKNP<HighSpeedNetIO> *iknp = new IKNP<HighSpeedNetIO>(io);
-
+  
   // generate random data
   if (party == ALICE) {
     prg.random_block(m0, nOT);
@@ -58,9 +129,10 @@ void TestIKNPOT(char **argv) {
   delete[] m1;
   delete[] r;
   delete[] b;
+  delete iknp;
   delete io;
 }
-// #endif
+#endif
 
 void TestPermutation() {
   uint64_t index[16];
@@ -79,6 +151,7 @@ void TestPermutation() {
 namespace OPVTest {
 
 void TestOblivSetup(char **argv) {
+#ifdef USE_EMP
   int port, party;
   block *seeds;
 
@@ -93,9 +166,23 @@ void TestOblivSetup(char **argv) {
   OblivSetup(8, 3, party, io, &seeds);
 
   delete io;
+#elif defined USE_LIBOTE
+  int party = atoi(argv[1]);
+  std::string ip = "127.0.0.1";
+  int port = 8442;
+  std::string socket = ip + ":" + std::to_string(port);
+
+  block *seeds;
+
+  auto chl = cp::asioConnect(socket, party ^ 1);
+
+  OblivSetup(8, 3, party, chl, &seeds);
+  
+#endif
 }
 
 void TestExpand(char **argv) {
+#ifdef USE_EMP
   int port, party;
   int length = 8;
   int x = 3;
@@ -123,6 +210,30 @@ void TestExpand(char **argv) {
   std::cout << "==============================" << std::endl;
 
   delete io;
+#elif defined USE_LIBOTE
+  int party = atoi(argv[1]);
+  std::string ip = "127.0.0.1";
+  int port = 8442;
+  std::string socket = ip + ":" + std::to_string(port);
+
+  auto chl = cp::asioConnect(socket, party ^ 1);
+
+  int length = 8;
+  int x = 3;
+  block v[length];
+  block *seeds;
+
+  OblivSetup(length, x, party, chl, &seeds);
+  Expand(length, x, seeds, party, v);
+
+  std::cout << "============= " << (party == Role::Alice ? "Alice" : "Bob") << std::endl;
+
+  for (int i = 0; i < length; i++) {
+    std::cout << v[i] << std::endl;
+  }
+
+  std::cout << "==============================" << std::endl;
+#endif
 }
 
 }
@@ -130,6 +241,7 @@ void TestExpand(char **argv) {
 namespace ShuffleTest {
 
 void TestShareTranslation(char **argv) {
+#ifdef USE_EMP
   int port, party;
   int length = 4;
 
@@ -169,6 +281,42 @@ void TestShareTranslation(char **argv) {
   }
 
   delete io;
+#elif defined USE_LIBOTE
+  int party = atoi(argv[1]);
+  std::string ip = "127.0.0.1";
+  int port = 8442;
+  std::string socket = ip + ":" + std::to_string(port);
+
+  auto chl = cp::asioConnect(socket, party ^ 1);
+
+  int length = 4;
+  uint64_t perm[4];
+  perm[0] = 3;
+  perm[1] = 1;
+  perm[2] = 0;
+  perm[3] = 2;
+
+  block a[length], b[length], delta[length];
+
+  ShareTranslation(perm, length, party, chl, a, b, delta);
+
+  if (party == Role::Alice) {
+    std::cout << "========================== output a" << std::endl;
+    for (int i = 0; i < length; i++) {
+      std::cout << a[i] << std::endl;
+    }
+
+    std::cout << "========================== output b" << std::endl;
+    for (int i = 0; i < length; i++) {
+      std::cout << b[i] << std::endl;
+    }
+  } else {
+    std::cout << "========================== output delta" << std::endl;
+    for (int i = 0; i < length; i++) {
+      std::cout << delta[i] << std::endl;
+    }
+  }
+#endif
 }
 
 void TestPermReconstruct() {
@@ -194,6 +342,7 @@ void TestPermReconstruct() {
 }
 
 void TestPermuteShare(char **argv) {
+#ifdef USE_EMP
   int port, party;
   int length = 4;
 
@@ -260,9 +409,73 @@ void TestPermuteShare(char **argv) {
   }
 
   delete io;
+#elif defined USE_LIBOTE
+  int party = atoi(argv[1]);
+  std::string ip = "127.0.0.1";
+  int port = 8442;
+  std::string socket = ip + ":" + std::to_string(port);
+
+  auto chl = cp::asioConnect(socket, party ^ 1);
+
+  uint64_t N = 16;
+  uint64_t T = 4;
+  int n = (int)(log2(N));
+  int t = (int)(log2(T));
+  int d = 2 * (int)ceil(n / t) - 1;
+  int subperm_num = N / T;
+
+  block x[N];
+  block out[N];
+
+  for (int i = 0; i < N; i++) {
+    x[i] = toBlock(0, i);
+  }
+
+  block a[N];
+  block b[N];
+  block delta[N];
+  uint64_t perms[d * N];
+  for (int i = 0; i < d * N; i++) {
+    perms[i] = i % T;
+  }
+
+  std::random_device rd;
+  std::mt19937 g(rd());
+
+  for (int i = 0; i < d * subperm_num; i++) {
+    std::shuffle(perms + i * T, perms + (i + 1) * T, g);
+  }
+
+  uint64_t subperms[d * N];
+  uint64_t perm[N];
+
+  Offline(N, T, perms, party, chl, perm, a, b, delta);
+
+  PermuteShare(N, T, perm, delta, x, a, b, party, chl, out);
+
+  if (party == Role::Alice) {
+    std::vector<block> out_view(out, out + N);
+    cp::sync_wait(chl.send(out_view));
+  } else {
+    std::cout << "============================= [perm]" << std::endl;
+    for (int i = 0; i < N; i++) {
+      std::cout << perm[i] << " ";
+    }
+    
+    std::cout << "\n============================= [out]" << std::endl;
+    std::vector<block> out_view(N);
+    block out_[N];
+    cp::sync_wait(chl.recv(out_view));
+    memcpy(out_, out_view.data(), N * sizeof(block));
+    for (int i = 0; i < N; i++) {
+      std::cout << out[i] + out_[i] << std::endl;;
+    }
+  }
+#endif
 }
 
 void TestSSShuffle(char **argv) {
+#ifdef USE_EMP
   int port, party;
   int length = 4;
 
@@ -347,6 +560,82 @@ void TestSSShuffle(char **argv) {
   // }
 
   delete io;
+#elif defined USE_LIBOTE
+  int party = atoi(argv[1]);
+  std::string ip = "127.0.0.1";
+  int port = 8442;
+  std::string socket = ip + ":" + std::to_string(port);
+
+  auto chl = cp::asioConnect(socket, party ^ 1);
+
+  uint64_t N = 16;
+  uint64_t T = 4;
+  int n = (int)(log2(N));
+  int t = (int)(log2(T));
+  int d = 2 * (int)ceil(n / t) - 1;
+  int subperm_num = N / T;
+
+  block out[N];
+  block x[N];
+  for (int i = 0; i < N; i++) {
+    x[i] = toBlock(0, i);
+  }
+
+  block a[d * N];
+  block b[d * N];
+  block delta[d * N];
+  block offset[(d - 1) * N];
+  uint64_t perms[d * N];
+  for (int i = 0; i < d * N; i++) {
+    perms[i] = i % T;
+  }
+
+  std::random_device rd;
+  std::mt19937 g(rd());
+
+  for (int i = 0; i < d * subperm_num; i++) {
+    std::shuffle(perms + i * T, perms + (i + 1) * T, g);
+  }
+
+  uint64_t subperms[d * N];
+  uint64_t perm[N];
+
+  auto start = std::chrono::system_clock::now();
+  Offline(N, T, perms, party, chl, perm, a, b, delta);
+  auto end = std::chrono::system_clock::now();
+  auto dura = std::chrono::duration_cast<std::chrono::milliseconds>(end - start);
+  std::cout << "time: " << double(dura.count()) * std::chrono::milliseconds::period::num / std::chrono::milliseconds::period::den << "s" << std::endl;
+
+  start = std::chrono::system_clock::now();
+  SecretSharedShuffle(N, T, party, chl, x, perm, delta, a, b, out);
+  end = std::chrono::system_clock::now();
+  dura = std::chrono::duration_cast<std::chrono::milliseconds>(end - start);
+  std::cout << "time: " << double(dura.count()) * std::chrono::milliseconds::period::num / std::chrono::milliseconds::period::den << "s" << std::endl;
+
+  if (party == Role::Alice) {
+    for (int i = 0; i < N; i++) {
+      std::cout << perm[i] << " ";
+    }
+    std::cout << std::endl;
+    std::vector<block> out_view(out, out + N);
+    cp::sync_wait(chl.send(out_view));
+  } else {
+
+    for (int i = 0; i < N; i++) {
+      std::cout << perm[i] << " ";
+    }
+    std::cout << std::endl;
+    
+    std::cout << "\n============================= [out]" << std::endl;
+    std::vector<block> out_view(N);
+    block out_[N];
+    cp::sync_wait(chl.recv(out_view));
+    memcpy(out_, out_view.data(), N * sizeof(block));
+    for (int i = 0; i < N; i++) {
+      std::cout << out[i] + out_[i] << std::endl;;
+    }
+  }
+#endif
 }
 
 }
@@ -358,6 +647,7 @@ int main(int argc, char **argv) {
   // ShuffleTest::TestPermReconstruct();
   // ShuffleTest::TestPermuteShare(argv);
   ShuffleTest::TestSSShuffle(argv);
+  // TestLibOTeIKNP(argv);
   // TestIKNPOT(argv);
   // TestPermutation();
 }

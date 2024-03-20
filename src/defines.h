@@ -2,6 +2,11 @@
 #ifndef __DEFINES_H
 #define __DEFINES_H
 
-#define USE_EMP
+#ifdef USE_LIBOTE
+enum Role {
+  Alice,
+  Bob
+};
+#endif
 
 #endif
